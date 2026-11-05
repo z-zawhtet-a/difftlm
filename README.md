@@ -58,6 +58,46 @@ uv run python -m difftlm.fit_sample \
 Learning rate and area scale are the two most important parameters to scale when fitting a new sample. Optimal learning rates vary significantly depending on the neural field architecture used. 
 
 
+### Nasal branch
+
+`TransmissionLineSimulator.rollout_nasal` adds a nasal cavity to the tube model. The cavity couples to the vocal tract through a velopharyngeal port of area `A_vp` (cm², one value per frame). The method returns the mouth and nose outputs as far-field pressures. The microphone signal is their sum.
+
+```python
+import jax, jax.numpy as jnp, numpy as np
+from difftlm.tract import TransmissionLineSimulator, SimulatorOptions
+
+fit = np.load("outputs/jude/cnn/fit.npz")  # written by difftlm.fit_sample
+uin, areas = jnp.asarray(fit["uin"]), jnp.asarray(fit["areas"])
+sr = 32000
+sim = TransmissionLineSimulator(
+    SimulatorOptions(SR=sr, TF=(len(uin) + 0.5) / sr, L=17.5, fft_size=1024)  # +0.5: exact sample count
+)
+A_vp = jnp.full(sim.n_windows, 0.4)  # port area per frame (cm²); 0 closes the port
+p_oral, p_nasal = sim.rollout_nasal(uin, areas, A_vp, L=sim.opt.L, key=jax.random.key(0))
+audio = p_oral + p_nasal
+```
+
+- The nasal cavity has 19 sections (11.4 cm), with the area function of Dang, Honda & Suzuki (1994, subject 1) and four paranasal sinuses as Helmholtz resonators (Dang & Honda, 1996). The values follow [VocalTractLab](https://github.com/TUD-STKS/VocalTractLabBackend-dev). The first four sections blend from `A_vp` to the fixed nasal area.
+- The port joins the oral tube at `port_fraction` of its sections from the glottis (default 0.55, about 9.3 cm for L = 17.5 cm). This position is an assumption. Set it per speaker.
+- Both outputs are `jω·G·U`, with `U` the volume velocity at the lips or at the nostrils, so they add correctly. `far_field_ref_area` sets the gain `G`. Pressures at the two radiation impedances do not add correctly: they over-weight the smaller opening (by about 8 dB for 5 cm² lips and 0.76 cm² nostrils).
+- At `A_vp = 0`, `rollout_nasal` approaches the far-field output of the unbranched tube. It does not equal `rollout`, which returns the pressure at the lip radiation impedance.
+- Turbulence noise also radiates through the nose. The flows that drive the turbulence gate include the leak through the port.
+- `A_vp` is clipped at 1e-4 cm², so its gradient is zero for a closed port. To optimise `A_vp`, parameterise it, for example with a softplus.
+
+`TransmissionLineSimulator.transfer_functions` returns the frequency responses of one frame, with or without the nasal branch.
+
+
+### Tests
+
+```bash
+uv run pytest
+```
+
+The tests compare every transfer function with an independent nodal solve of the same circuit.
+
+The turbulence noise transfer functions (flow at each section, and noise to output) used to combine chain matrices from two different junctions. This is fixed. The voiced output is unchanged, but the noise level and spectrum differ from earlier versions.
+
+
 ### To Dos
 - [ ] Upload autoencoder weights and code
 - [ ] Add MRI experiments
